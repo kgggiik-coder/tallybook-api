@@ -1,0 +1,170 @@
+// Tallybook — Prisma schema
+// Multi-tenant: every table hangs off a Business (one salon/clinic/shop = one tenant).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy & users
+// ---------------------------------------------------------------------------
+
+model Business {
+  id        String   @id @default(cuid())
+  name      String
+  timezone  String   @default("America/New_York")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  clients       Client[]
+  appointments  Appointment[]
+  noShowRecords NoShowRecord[]
+  subscription  Subscription?
+
+  @@map("businesses")
+}
+
+enum Role {
+  OWNER   // always has every permission, regardless of the flags below
+  MANAGER
+  STAFF
+}
+
+model User {
+  id           String   @id @default(cuid())
+  businessId   String
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(STAFF)
+
+  canViewFinancials Boolean @default(false) // net revenue, no-show $ loss, stats
+  canManageBilling  Boolean @default(false) // subscription/plan changes
+  canManageStaff    Boolean @default(false) // invite/edit/remove teammates
+  canManageSchedule Boolean @default(true)  // add/edit/delete appointments
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointments Appointment[] @relation("AppointmentStaff")
+
+  @@index([businessId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Billing — mirrors Stripe subscription state, one per business
+// ---------------------------------------------------------------------------
+
+enum PlanTier {
+  SOLO
+  TEAM
+  GROWTH
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  PAUSED
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  businessId           String             @unique
+  stripeCustomerId     String             @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  plan                 PlanTier
+  status               SubscriptionStatus @default(INCOMPLETE)
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+// ---------------------------------------------------------------------------
+// Clients (the business's customers, not Tallybook users)
+// ---------------------------------------------------------------------------
+
+model Client {
+  id         String   @id @default(cuid())
+  businessId String
+  name       String
+  email      String?
+  phone      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+
+  @@index([businessId])
+  @@map("clients")
+}
+
+// ---------------------------------------------------------------------------
+// Appointments & no-shows
+// ---------------------------------------------------------------------------
+
+enum AppointmentStatus {
+  BOOKED
+  DONE
+  NOSHOW
+  CANCELLED
+}
+
+model Appointment {
+  id         String            @id @default(cuid())
+  businessId String
+  clientId   String
+  staffId    String?
+  service    String
+  startTime  DateTime
+  endTime    DateTime
+  value      Decimal           @db.Decimal(10, 2)
+  status     AppointmentStatus @default(BOOKED)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  client       Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  staff        User?         @relation("AppointmentStaff", fields: [staffId], references: [id], onDelete: SetNull)
+  noShowRecord NoShowRecord?
+
+  @@index([businessId, startTime])
+  @@index([clientId])
+  @@map("appointments")
+}
+
+model NoShowRecord {
+  id            String   @id @default(cuid())
+  businessId    String
+  appointmentId String   @unique
+  clientId      String
+  valueLost     Decimal  @db.Decimal(10, 2)
+  feeCharged    Decimal? @db.Decimal(10, 2)
+  stripeChargeId String?
+  recordedAt    DateTime @default(now())
+
+  business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, recordedAt])
+  @@map("no_show_records")
+}
